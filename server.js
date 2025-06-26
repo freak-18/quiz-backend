@@ -14,7 +14,7 @@ const io = new Server(server, {
   },
 });
 
-const rooms = {}; // Stores all quiz rooms
+const rooms = {};
 
 io.on('connection', (socket) => {
   console.log(`🟢 Connected: ${socket.id}`);
@@ -37,7 +37,7 @@ io.on('connection', (socket) => {
     socket.emit('room-created', roomCode);
   });
 
-  socket.on('join-room', ({ name, emoji, roomCode }) => {
+  socket.on('join-room', ({ name, roomCode }) => {
     const room = rooms[roomCode];
     if (!room) {
       socket.emit('room-error', { message: 'Room does not exist.' });
@@ -47,8 +47,8 @@ io.on('connection', (socket) => {
     socket.join(roomCode);
 
     if (!room.players.find(p => p.id === socket.id)) {
-      room.players.push({ id: socket.id, name, emoji, score: 0 });
-      console.log(`👤 ${emoji || ''} ${name} joined room ${roomCode}`);
+      room.players.push({ id: socket.id, name, score: 0 });
+      console.log(`👤 ${name} joined room ${roomCode}`);
     }
 
     io.to(roomCode).emit('lobby-update', room.players);
@@ -56,7 +56,18 @@ io.on('connection', (socket) => {
 
   socket.on('send-multiple-questions', ({ roomCode, questions }) => {
     if (!rooms[roomCode]) return;
-    rooms[roomCode].questions = questions;
+
+    const formatted = questions.map((q, i) => {
+      console.log(`✅ Q${i + 1}: ${q.text}`);
+      console.log(`   ➤ Correct Answer Set: ${q.correct}`);
+
+      return {
+        ...q,
+        correct: (q.correct || '').trim() || 'N/A', // no index parsing
+      };
+    });
+
+    rooms[roomCode].questions = formatted;
     rooms[roomCode].currentIndex = 0;
   });
 
@@ -71,6 +82,7 @@ io.on('connection', (socket) => {
     const room = rooms[roomCode];
     if (!room) return;
 
+    room.players = room.players.filter(p => io.sockets.sockets.get(p.id));
     const player = room.players.find(p => p.id === socket.id);
     const question = room.questions[room.currentIndex];
     if (!player || !question || room.answeredPlayers.has(socket.id)) return;
@@ -79,6 +91,8 @@ io.on('connection', (socket) => {
 
     const isCorrect = option.trim().toLowerCase() === question.correct.trim().toLowerCase();
     let score = 0;
+
+    console.log(`🧪 Player chose: "${option}" | Correct: "${question.correct}" | Is Correct: ${isCorrect}`);
 
     if (isCorrect) {
       const now = Date.now();
@@ -97,11 +111,21 @@ io.on('connection', (socket) => {
 
     socket.emit('answer-result', { score });
 
-    // End question early if all players answered
+    console.log(`Room ${roomCode} - Answered: ${room.answeredPlayers.size}/${room.players.length}`);
+
     if (room.answeredPlayers.size === room.players.length) {
       clearTimeout(room.timer);
       clearInterval(room.countdownInterval);
-      endCurrentQuestion(roomCode);
+
+      console.log(`✅ All players answered. Sending correct answer: ${question.correct}`);
+
+      io.to(roomCode).emit('all-answered', {
+        correct: question.correct?.trim() || 'N/A'
+      });
+
+      setTimeout(() => {
+        endCurrentQuestion(roomCode);
+      }, 2500);
     }
   });
 
@@ -123,15 +147,17 @@ io.on('connection', (socket) => {
     for (const roomCode in rooms) {
       const room = rooms[roomCode];
       if (!room) continue;
+
       room.players = room.players.filter(p => p.id !== socket.id);
       room.answeredPlayers.delete(socket.id);
+
       io.to(roomCode).emit('lobby-update', room.players);
     }
+
     console.log(`🔴 Disconnected: ${socket.id}`);
   });
 });
 
-// Start next question
 function startNextQuestion(roomCode) {
   const room = rooms[roomCode];
   if (!room) return;
@@ -150,7 +176,7 @@ function startNextQuestion(roomCode) {
   room.questionStartTime = Date.now();
 
   io.to(roomCode).emit('question', question);
-  console.log(`🟡 Room ${roomCode} - Question ${room.currentIndex + 1}`);
+  console.log(`🟡 Room ${roomCode} - Question ${room.currentIndex + 1}: "${question.text}"`);
 
   let timeLeft = question.timeLimit || 15;
 
@@ -162,11 +188,17 @@ function startNextQuestion(roomCode) {
 
   room.timer = setTimeout(() => {
     clearInterval(room.countdownInterval);
-    endCurrentQuestion(roomCode);
+    console.log(`⏰ Time's up! Sending correct answer: ${question.correct}`);
+    io.to(roomCode).emit('all-answered', {
+      correct: question.correct?.trim() || 'N/A'
+    });
+
+    setTimeout(() => {
+      endCurrentQuestion(roomCode);
+    }, 2500);
   }, timeLeft * 1000);
 }
 
-// End current question and emit leaderboard
 function endCurrentQuestion(roomCode) {
   const room = rooms[roomCode];
   if (!room) return;
@@ -174,12 +206,13 @@ function endCurrentQuestion(roomCode) {
   io.to(roomCode).emit('question-ended');
 
   const sortedPlayers = [...room.players].sort((a, b) => b.score - a.score);
-  io.to(roomCode).emit('leaderboard', sortedPlayers); // ✅ Full player list
+  io.to(roomCode).emit('leaderboard', sortedPlayers);
 
   room.currentIndex++;
-  setTimeout(() => startNextQuestion(roomCode), 5000); // Delay before next question
+  setTimeout(() => startNextQuestion(roomCode), 5000);
 }
+
 const PORT = process.env.PORT || 5000;
 server.listen(PORT, () => {
-  console.log(`🚀 Server running on http://localhost:${PORT}`);
+  console.log(`🚀 Server running at http://localhost:${PORT}`);
 });
