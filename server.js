@@ -32,7 +32,6 @@ io.on('connection', (socket) => {
       };
       console.log(`📦 Room ${roomCode} created.`);
     }
-
     socket.join(roomCode);
     socket.emit('room-created', roomCode);
   });
@@ -57,15 +56,10 @@ io.on('connection', (socket) => {
   socket.on('send-multiple-questions', ({ roomCode, questions }) => {
     if (!rooms[roomCode]) return;
 
-    const formatted = questions.map((q, i) => {
-      console.log(`✅ Q${i + 1}: ${q.text}`);
-      console.log(`   ➤ Correct Answer Set: ${q.correct}`);
-
-      return {
-        ...q,
-        correct: (q.correct || '').trim() || 'N/A', // no index parsing
-      };
-    });
+    const formatted = questions.map(q => ({
+      ...q,
+      correct: q.correct?.trim() || 'N/A'
+    }));
 
     rooms[roomCode].questions = formatted;
     rooms[roomCode].currentIndex = 0;
@@ -82,7 +76,6 @@ io.on('connection', (socket) => {
     const room = rooms[roomCode];
     if (!room) return;
 
-    room.players = room.players.filter(p => io.sockets.sockets.get(p.id));
     const player = room.players.find(p => p.id === socket.id);
     const question = room.questions[room.currentIndex];
     if (!player || !question || room.answeredPlayers.has(socket.id)) return;
@@ -91,8 +84,6 @@ io.on('connection', (socket) => {
 
     const isCorrect = option.trim().toLowerCase() === question.correct.trim().toLowerCase();
     let score = 0;
-
-    console.log(`🧪 Player chose: "${option}" | Correct: "${question.correct}" | Is Correct: ${isCorrect}`);
 
     if (isCorrect) {
       const now = Date.now();
@@ -103,30 +94,34 @@ io.on('connection', (socket) => {
         score = 1000;
         room.firstCorrectAnswered = true;
       } else {
-        score = Math.max(100, Math.floor(timeLeft * 10));
+        score = Math.floor(500 + (timeLeft / question.timeLimit) * 500); // Up to 1000
       }
 
       player.score += score;
     }
 
-    socket.emit('answer-result', { score });
-
-    console.log(`Room ${roomCode} - Answered: ${room.answeredPlayers.size}/${room.players.length}`);
-
     if (room.answeredPlayers.size === room.players.length) {
       clearTimeout(room.timer);
       clearInterval(room.countdownInterval);
 
-      console.log(`✅ All players answered. Sending correct answer: ${question.correct}`);
-
       io.to(roomCode).emit('all-answered', {
-        correct: question.correct?.trim() || 'N/A'
+        correct: question.correct
       });
 
       setTimeout(() => {
         endCurrentQuestion(roomCode);
       }, 2500);
     }
+  });
+
+  socket.on('kick-player', ({ roomCode, playerId }) => {
+    const room = rooms[roomCode];
+    if (!room) return;
+
+    room.players = room.players.filter(p => p.id !== playerId);
+    io.to(roomCode).emit('lobby-update', room.players);
+    io.to(playerId).emit('room-error', { message: 'You were removed by the host.' });
+    io.sockets.sockets.get(playerId)?.disconnect(true);
   });
 
   socket.on('end-quiz', ({ roomCode }) => {
@@ -176,7 +171,7 @@ function startNextQuestion(roomCode) {
   room.questionStartTime = Date.now();
 
   io.to(roomCode).emit('question', question);
-  console.log(`🟡 Room ${roomCode} - Question ${room.currentIndex + 1}: "${question.text}"`);
+  console.log(`🟡 Question ${room.currentIndex + 1}: "${question.text}"`);
 
   let timeLeft = question.timeLimit || 15;
 
@@ -188,9 +183,8 @@ function startNextQuestion(roomCode) {
 
   room.timer = setTimeout(() => {
     clearInterval(room.countdownInterval);
-    console.log(`⏰ Time's up! Sending correct answer: ${question.correct}`);
     io.to(roomCode).emit('all-answered', {
-      correct: question.correct?.trim() || 'N/A'
+      correct: question.correct || 'N/A'
     });
 
     setTimeout(() => {
