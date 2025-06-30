@@ -19,9 +19,10 @@ const rooms = {};
 io.on('connection', (socket) => {
   console.log(`🟢 Connected: ${socket.id}`);
 
-  socket.on('create-room', (roomCode) => {
+  socket.on('create-room', ({ roomCode, maxPlayers }) => {
     if (!rooms[roomCode]) {
       rooms[roomCode] = {
+        hostId: socket.id,
         players: [],
         questions: [],
         currentIndex: 0,
@@ -29,8 +30,9 @@ io.on('connection', (socket) => {
         timer: null,
         countdownInterval: null,
         quizStarted: false,
+        maxPlayers: maxPlayers || 10,
       };
-      console.log(`📦 Room ${roomCode} created.`);
+      console.log(`📦 Room ${roomCode} created with max ${rooms[roomCode].maxPlayers} players.`);
     }
     socket.join(roomCode);
     socket.emit('room-created', roomCode);
@@ -43,31 +45,47 @@ io.on('connection', (socket) => {
       return;
     }
 
-    socket.join(roomCode);
+    if (socket.id === room.hostId) return;
 
-    if (!room.players.find(p => p.id === socket.id)) {
-      room.players.push({ id: socket.id, name, score: 0 });
-      console.log(`👤 ${name} joined room ${roomCode}`);
+    room.players = room.players.filter(p => io.sockets.sockets.get(p.id));
+
+    if (room.players.length >= room.maxPlayers) {
+      socket.emit('room-full', { message: 'Room is full.' });
+      return;
     }
 
-    io.to(roomCode).emit('lobby-update', room.players);
+    const duplicate = room.players.some(p => p.name.toLowerCase() === name.toLowerCase())||(p => p.name.toUpperCase() === name.toUpperCase());
+    if (duplicate) {
+      socket.emit('room-error', { message: 'Name already taken.' });
+      return;
+    }
+
+    const newPlayer = { id: socket.id, name, score: 0 };
+    room.players.push(newPlayer);
+    socket.join(roomCode);
+    console.log(`👤 ${name} joined room ${roomCode}`);
+
+    io.to(roomCode).emit('lobby-update', {
+      players: room.players,
+      maxPlayers: room.maxPlayers,
+    });
   });
 
   socket.on('send-multiple-questions', ({ roomCode, questions }) => {
-    if (!rooms[roomCode]) return;
+    const room = rooms[roomCode];
+    if (!room) return;
 
-    const formatted = questions.map(q => ({
+    room.questions = questions.map(q => ({
       ...q,
-      correct: q.correct?.trim() || 'N/A'
+      correct: q.correct?.trim() || 'N/A',
     }));
-
-    rooms[roomCode].questions = formatted;
-    rooms[roomCode].currentIndex = 0;
+    room.currentIndex = 0;
   });
 
   socket.on('start-quiz', (roomCode) => {
     const room = rooms[roomCode];
     if (!room) return;
+
     room.quizStarted = true;
     startNextQuestion(roomCode);
   });
@@ -83,18 +101,17 @@ io.on('connection', (socket) => {
     room.answeredPlayers.add(socket.id);
 
     const isCorrect = option.trim().toLowerCase() === question.correct.trim().toLowerCase();
-    let score = 0;
-
     if (isCorrect) {
       const now = Date.now();
       const timeTaken = (now - room.questionStartTime) / 1000;
       const timeLeft = question.timeLimit - timeTaken;
 
+      let score = 0;
       if (!room.firstCorrectAnswered) {
         score = 1000;
         room.firstCorrectAnswered = true;
       } else {
-        score = Math.floor(500 + (timeLeft / question.timeLimit) * 500); // Up to 1000
+        score = Math.floor(500+ (timeLeft / question.timeLimit) * 500);
       }
 
       player.score += score;
@@ -119,8 +136,12 @@ io.on('connection', (socket) => {
     if (!room) return;
 
     room.players = room.players.filter(p => p.id !== playerId);
-    io.to(roomCode).emit('lobby-update', room.players);
-    io.to(playerId).emit('room-error', { message: 'You were removed by the host.' });
+    io.to(roomCode).emit('lobby-update', {
+      players: room.players,
+      maxPlayers: room.maxPlayers
+    });
+
+    io.to(playerId).emit('kicked');
     io.sockets.sockets.get(playerId)?.disconnect(true);
   });
 
@@ -131,8 +152,8 @@ io.on('connection', (socket) => {
     clearTimeout(room.timer);
     clearInterval(room.countdownInterval);
 
-    const sortedTopPlayers = [...room.players].sort((a, b) => b.score - a.score).slice(0, 5);
-    io.to(roomCode).emit('final-leaderboard', sortedTopPlayers);
+    const top5 = [...room.players].sort((a, b) => b.score - a.score).slice(0, 5);
+    io.to(roomCode).emit('final-leaderboard', top5);
     io.to(roomCode).emit('quiz-end');
 
     delete rooms[roomCode];
@@ -143,25 +164,38 @@ io.on('connection', (socket) => {
       const room = rooms[roomCode];
       if (!room) continue;
 
-      room.players = room.players.filter(p => p.id !== socket.id);
-      room.answeredPlayers.delete(socket.id);
+      if (room.hostId === socket.id) {
+        console.log(`❌ Host disconnected. Deleting room ${roomCode}`);
+        delete rooms[roomCode];
+        continue;
+      }
 
-      io.to(roomCode).emit('lobby-update', room.players);
+      const wasPlayer = room.players.find(p => p.id === socket.id);
+      if (wasPlayer) {
+        room.players = room.players.filter(p => p.id !== socket.id);
+        room.answeredPlayers.delete(socket.id);
+
+        io.to(roomCode).emit('lobby-update', {
+          players: room.players,
+          maxPlayers: room.maxPlayers
+        });
+      }
     }
 
     console.log(`🔴 Disconnected: ${socket.id}`);
   });
 });
 
+// Question flow
 function startNextQuestion(roomCode) {
   const room = rooms[roomCode];
   if (!room) return;
 
   if (room.currentIndex >= room.questions.length) {
-    const sortedTopPlayers = [...room.players].sort((a, b) => b.score - a.score).slice(0, 5);
-    io.to(roomCode).emit('final-leaderboard', sortedTopPlayers);
+    const sorted = [...room.players].sort((a, b) => b.score - a.score).slice(0, 5);
+    io.to(roomCode).emit('final-leaderboard', sorted);
     io.to(roomCode).emit('quiz-end');
-    console.log(`🏁 Quiz ended in room ${roomCode}`);
+    console.log(`🏁 Quiz ended for room ${roomCode}`);
     return;
   }
 
@@ -171,7 +205,7 @@ function startNextQuestion(roomCode) {
   room.questionStartTime = Date.now();
 
   io.to(roomCode).emit('question', question);
-  console.log(`🟡 Question ${room.currentIndex + 1}: "${question.text}"`);
+  console.log(`🟡 Q${room.currentIndex + 1}: ${question.text}`);
 
   let timeLeft = question.timeLimit || 15;
 
@@ -199,8 +233,8 @@ function endCurrentQuestion(roomCode) {
 
   io.to(roomCode).emit('question-ended');
 
-  const sortedPlayers = [...room.players].sort((a, b) => b.score - a.score);
-  io.to(roomCode).emit('leaderboard', sortedPlayers);
+  const sorted = [...room.players].sort((a, b) => b.score - a.score);
+  io.to(roomCode).emit('leaderboard', sorted);
 
   room.currentIndex++;
   setTimeout(() => startNextQuestion(roomCode), 5000);
