@@ -54,7 +54,7 @@ io.on('connection', (socket) => {
       return;
     }
 
-    const duplicate = room.players.some(p => p.name.toLowerCase() === name.toLowerCase())||(p => p.name.toUpperCase() === name.toUpperCase());
+    const duplicate = room.players.some(p => p.name.toLowerCase().trim() === name.toLowerCase().trim());
     if (duplicate) {
       socket.emit('room-error', { message: 'Name already taken.' });
       return;
