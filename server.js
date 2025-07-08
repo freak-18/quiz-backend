@@ -31,6 +31,8 @@ io.on('connection', (socket) => {
         countdownInterval: null,
         quizStarted: false,
         maxPlayers: maxPlayers || 10,
+        questionStartTime: null,
+        firstCorrectAnswered: false,
       };
       console.log(`📦 Room ${roomCode} created with max ${rooms[roomCode].maxPlayers} players.`);
     }
@@ -87,7 +89,45 @@ io.on('connection', (socket) => {
     if (!room) return;
 
     room.quizStarted = true;
-    startNextQuestion(roomCode);
+    io.to(roomCode).emit('quiz-started');
+  });
+
+  socket.on('next-question', (roomCode) => {
+    const room = rooms[roomCode];
+    if (!room || !room.quizStarted) return;
+
+    if (room.currentIndex >= room.questions.length) {
+      // Handled in endCurrentQuestion now
+      return;
+    }
+
+    const question = room.questions[room.currentIndex];
+    room.answeredPlayers = new Set();
+    room.firstCorrectAnswered = false;
+    room.questionStartTime = Date.now();
+
+    io.to(roomCode).emit('question', question);
+    console.log(`🟡 Q${room.currentIndex + 1}: ${question.text}`);
+
+    let timeLeft = question.timeLimit || 15;
+
+    room.countdownInterval = setInterval(() => {
+      timeLeft--;
+      io.to(roomCode).emit('time-left', timeLeft);
+      if (timeLeft <= 0) clearInterval(room.countdownInterval);
+    }, 1000);
+
+    room.timer = setTimeout(() => {
+      clearInterval(room.countdownInterval);
+      io.to(roomCode).emit('question-locked');
+      io.to(roomCode).emit('all-answered', {
+        correct: question.correct || 'N/A',
+      });
+
+      setTimeout(() => {
+        endCurrentQuestion(roomCode);
+      }, 2500);
+    }, timeLeft * 1000);
   });
 
   socket.on('answer', ({ option, roomCode }) => {
@@ -111,7 +151,7 @@ io.on('connection', (socket) => {
         score = 1000;
         room.firstCorrectAnswered = true;
       } else {
-        score = Math.floor(500+ (timeLeft / question.timeLimit) * 500);
+        score = Math.floor(500 + (timeLeft / question.timeLimit) * 500);
       }
 
       player.score += score;
@@ -120,9 +160,9 @@ io.on('connection', (socket) => {
     if (room.answeredPlayers.size === room.players.length) {
       clearTimeout(room.timer);
       clearInterval(room.countdownInterval);
-
+      io.to(roomCode).emit('question-locked');
       io.to(roomCode).emit('all-answered', {
-        correct: question.correct
+        correct: question.correct,
       });
 
       setTimeout(() => {
@@ -138,7 +178,7 @@ io.on('connection', (socket) => {
     room.players = room.players.filter(p => p.id !== playerId);
     io.to(roomCode).emit('lobby-update', {
       players: room.players,
-      maxPlayers: room.maxPlayers
+      maxPlayers: room.maxPlayers,
     });
 
     io.to(playerId).emit('kicked');
@@ -152,8 +192,8 @@ io.on('connection', (socket) => {
     clearTimeout(room.timer);
     clearInterval(room.countdownInterval);
 
-    const top5 = [...room.players].sort((a, b) => b.score - a.score).slice(0, 5);
-    io.to(roomCode).emit('final-leaderboard', top5);
+    const sorted = [...room.players].sort((a, b) => b.score - a.score);
+    io.to(roomCode).emit('final-leaderboard', sorted);
     io.to(roomCode).emit('quiz-end');
 
     delete rooms[roomCode];
@@ -177,7 +217,7 @@ io.on('connection', (socket) => {
 
         io.to(roomCode).emit('lobby-update', {
           players: room.players,
-          maxPlayers: room.maxPlayers
+          maxPlayers: room.maxPlayers,
         });
       }
     }
@@ -186,47 +226,7 @@ io.on('connection', (socket) => {
   });
 });
 
-// Question flow
-function startNextQuestion(roomCode) {
-  const room = rooms[roomCode];
-  if (!room) return;
-
-  if (room.currentIndex >= room.questions.length) {
-    const sorted = [...room.players].sort((a, b) => b.score - a.score).slice(0, 5);
-    io.to(roomCode).emit('final-leaderboard', sorted);
-    io.to(roomCode).emit('quiz-end');
-    console.log(`🏁 Quiz ended for room ${roomCode}`);
-    return;
-  }
-
-  const question = room.questions[room.currentIndex];
-  room.answeredPlayers = new Set();
-  room.firstCorrectAnswered = false;
-  room.questionStartTime = Date.now();
-
-  io.to(roomCode).emit('question', question);
-  console.log(`🟡 Q${room.currentIndex + 1}: ${question.text}`);
-
-  let timeLeft = question.timeLimit || 15;
-
-  room.countdownInterval = setInterval(() => {
-    timeLeft--;
-    io.to(roomCode).emit('time-left', timeLeft);
-    if (timeLeft <= 0) clearInterval(room.countdownInterval);
-  }, 1000);
-
-  room.timer = setTimeout(() => {
-    clearInterval(room.countdownInterval);
-    io.to(roomCode).emit('all-answered', {
-      correct: question.correct || 'N/A'
-    });
-
-    setTimeout(() => {
-      endCurrentQuestion(roomCode);
-    }, 2500);
-  }, timeLeft * 1000);
-}
-
+// ✅ Updated function to automatically show final leaderboard after last question
 function endCurrentQuestion(roomCode) {
   const room = rooms[roomCode];
   if (!room) return;
@@ -236,8 +236,17 @@ function endCurrentQuestion(roomCode) {
   const sorted = [...room.players].sort((a, b) => b.score - a.score);
   io.to(roomCode).emit('leaderboard', sorted);
 
+  const isLastQuestion = room.currentIndex >= room.questions.length - 1;
   room.currentIndex++;
-  setTimeout(() => startNextQuestion(roomCode), 5000);
+
+  if (isLastQuestion) {
+    setTimeout(() => {
+      io.to(roomCode).emit('final-leaderboard', sorted);
+      io.to(roomCode).emit('quiz-end');
+      console.log(`🏁 Auto-ended quiz for room ${roomCode}`);
+      delete rooms[roomCode];
+    }, 8000); // Let leaderboard show for 8s before final
+  }
 }
 
 const PORT = process.env.PORT || 5000;
